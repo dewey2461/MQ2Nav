@@ -467,7 +467,7 @@ void NavMeshTool::handleRender()
 	}
 
 	drawConvexVolumes(&dd);
-
+	
 	if (m_tool)
 		m_tool->handleRender();
 	renderToolStates();

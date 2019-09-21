@@ -157,6 +157,11 @@ private:
 	void DrawAreaTypesEditor();
 	void ShowImportExportSettingsDialog(bool import);
 
+	void SyncViewToEQ(void);
+	void BuildMissingZones(void);
+	void LoadNextMissingZoneFile(void);
+	void CalcFPS(void);
+
 
 private:
 	EQConfig m_eqConfig;
@@ -190,6 +195,9 @@ private:
 	std::string m_activityMessage;
 	bool m_showLog;
 	bool m_showFailedToOpenDialog = false;
+
+	// If TRUE application will read the camera position and direction from INI file every 250 ms 
+	int m_syncViewFlag;
 
 	glm::mat4 m_proj;
 	glm::mat4 m_model;
@@ -236,6 +244,9 @@ private:
 	bool m_showProperties = true;
 	bool m_showMapAreas = false;
 	bool m_showOverlay = true;
+	bool m_BuildMissing = false;
+	int  m_BuildMissingStep = 0;
+	float m_FPS = 0;
 
 	// zone to load on next pass
 	std::string m_nextZoneToLoad;

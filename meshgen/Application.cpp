@@ -98,6 +98,8 @@ Application::Application(const std::string& defaultZone)
 	, m_showLog(false)
 	, m_nextZoneToLoad(defaultZone)
 	, m_loadMeshOnZone(!defaultZone.empty())
+	, m_syncViewFlag(0)
+	, m_FPS(0)
 {
 	// Construct the path to the ini file
 	CHAR fullPath[MAX_PATH] = { 0 };
@@ -229,6 +231,23 @@ void Application::DestroyWindow()
 	SDL_Quit();
 }
 
+void Application::CalcFPS(void)
+{
+	static int    Frames = 0;
+	static UINT32 LastTick = 0;
+
+	UINT32 tick = SDL_GetTicks();
+
+	if (LastTick == 0) LastTick = tick;
+	if (tick - LastTick > 1000) {
+		m_FPS = 1000.0 * Frames / (1.0 * tick - LastTick);
+		if (m_FPS > 999) m_FPS = 999;
+		LastTick = tick;
+		Frames = 0;
+	}
+	Frames++;
+}
+
 int Application::RunMainLoop()
 {
 	m_time = 0.0f;
@@ -238,6 +257,7 @@ int Application::RunMainLoop()
 
 	while (!m_done)
 	{
+
 		// fractional time since last update
 		Uint32 time = SDL_GetTicks();
 		m_timeDelta = (time - m_lastTime) / 1000.0f;
@@ -254,6 +274,8 @@ int Application::RunMainLoop()
 				m_meshTool->handleUpdate(DELTA_TIME);
 			simIter++;
 		}
+
+		CalcFPS();
 
 		ImVec4 clear_color = ImVec4(0.3f, 0.3f, 0.32f, 1.00f);
 
@@ -319,14 +341,18 @@ int Application::RunMainLoop()
 		SDL_GL_SwapWindow(m_window);
 
 		// Do additional work here after rendering
+		if (m_syncViewFlag)
+			SyncViewToEQ();
+		if (m_BuildMissing)
+			BuildMissingZones();
 
 		// Load a zone if a zone load was requested
 		if (!m_nextZoneToLoad.empty())
 		{
 			PushEvent([zone = m_nextZoneToLoad, loadMesh = m_loadMeshOnZone, this]()
-			{
-				LoadGeometry(zone, loadMesh);
-			});
+				{
+					LoadGeometry(zone, loadMesh);
+				});
 
 			m_loadMeshOnZone = false;
 			m_nextZoneToLoad.clear();
@@ -337,6 +363,160 @@ int Application::RunMainLoop()
 
 	m_geom.reset();
 	return 0;
+}
+
+void Debug(char fmt[], ...)
+{
+	time_t t;
+	struct tm* now;
+	char ts[256];
+	FILE* fp;
+	va_list marker;
+
+	char DebugFile[] = "MyDebug.txt";
+
+
+	if (DebugFile)
+	{
+		fp = fopen(DebugFile, "a");
+		if (!fp)
+		{
+			//			printf("FATAL ERROR In Debug: Can't open debug file '%s'.\n",DebugFile);
+			//			exit(0);
+			return;
+		}
+		time(&t);
+		now = localtime(&t);
+		sprintf(ts, "%s", asctime(now));
+		ts[24] = 0;
+		fprintf(fp, "%s ", ts);
+
+		va_start(marker, fmt);
+		vfprintf(fp, fmt, marker);
+		va_end(marker);
+		fclose(fp);
+	}
+}
+
+
+
+
+// Loop over the list of zones from Zones.ini and look for next one that is in the EQ folder but not the MQ folder
+void Application::LoadNextMissingZoneFile(void)
+{
+	const char* MQPath = m_eqConfig.GetOutputPath().c_str();
+	const char* EQPath = m_eqConfig.GetEverquestPath().c_str();
+
+	char ZonesName[255];
+	sprintf(ZonesName, "%s\\Zones.ini", MQPath);
+
+	FILE* ZonesFile;
+	ZonesFile = fopen(ZonesName, "r");
+	char Line[255];
+	while (ZonesFile && fgets(Line, 255, ZonesFile))
+	{
+		char* p = strstr(Line, "=");
+
+		if (p) {
+			char* q = strstr(p, "\n");
+			if (q) q[0] = 0;
+
+			char SrcPath[255];
+			char DesPath[255];
+			sprintf(DesPath, "%s\\MQ2Nav\\%s.navmesh", MQPath, p + 1);
+
+			FILE* fpSrc = NULL;
+			FILE* fpDes = NULL;
+
+			fpDes = fopen(DesPath, "r");
+			if (!fpDes) {
+				sprintf(SrcPath, "%s\\%s.s3d", EQPath, p + 1);
+				fpSrc = fopen(SrcPath, "r");
+				if (!fpSrc) {
+					sprintf(SrcPath, "%s\\%s.zon", EQPath, p + 1);
+					fpSrc = fopen(SrcPath, "r");
+				}
+			}
+
+			if (fpSrc && !fpDes) {
+				fclose(ZonesFile);
+				fclose(fpSrc);
+				std::string zoneShortName(p + 1);
+				LoadGeometry(zoneShortName, false);
+				m_BuildMissingStep = 1;					// Set flag to show we're loading
+				return;
+			}
+
+			if (fpSrc) fclose(fpSrc);
+			if (fpDes) fclose(fpDes);
+		}
+	}
+	if (ZonesFile) fclose(ZonesFile);
+
+
+}
+
+void Application::BuildMissingZones(void)
+{
+
+	switch (m_BuildMissingStep) {
+	case 0:	// Start out by finding the 'next' zone to load and process 
+		m_BuildMissingStep = 9;
+		LoadNextMissingZoneFile();
+		break;
+	case 1:	// Check to see if zone loaded if so hit the build button
+		m_BuildMissingStep = 9;
+		if (m_zoneLoaded) {
+			if (m_meshTool) {
+				m_meshTool->handleBuild();
+				m_BuildMissingStep = 2;
+			}
+		}
+		break;
+	case 2:	// Check to see if zone has completed build 
+		if (m_meshTool->isBuildingTiles()) return;
+		m_meshTool->SaveNavMesh();
+	case 9:
+		m_BuildMissing = false;
+		m_BuildMissingStep = 0;
+	}
+}
+
+void Application::SyncViewToEQ()
+{
+	const char* MQPath = m_eqConfig.GetOutputPath().c_str();
+	char NavINI[255];
+	char Val[10];
+	char* Keys[] = { "X","Y","Z","Az","El" };
+
+	sprintf(NavINI, "%s\\MQ2Nav.ini", MQPath);
+
+	//Debug("SyncViewToEQ\n");
+
+	if (m_syncViewFlag == 1) {
+		GetPrivateProfileString("SyncView", "Zone", "NONE", Val, 255, NavINI);
+		char* p = strstr(Val, "_");
+		if (p)* p = 0;
+		if (m_zoneShortname.compare(Val) != 0) {
+			std::string ZoneShortName(Val);
+			//Debug("SyncViewToEQ Zone = [%s]\n", Val);
+			LoadGeometry(ZoneShortName, true);
+		}
+		m_syncViewFlag = 2;
+		return;
+	}
+	if (m_syncViewFlag == 2) {
+		for (int i = 0; i < 5; i++)
+		{
+			GetPrivateProfileString("SyncView", Keys[i], "0", Val, 255, NavINI);
+			if (i == 0) m_cam.x = atof(Val);
+			if (i == 1) m_cam.z = atof(Val);
+			if (i == 2) m_cam.y = atof(Val);
+			if (i == 3) m_r.y = atof(Val) + 180;
+			if (i == 4) m_r.x = -atof(Val);
+		}
+	}
+	m_syncViewFlag = 0;
 }
 
 void Application::HandleEvents()
@@ -456,16 +636,16 @@ void Application::HandleEvents()
 						if (SDL_GetModState() & KMOD_CTRL)
 						{
 							m_mposSet = true;
-							m_mpos[0] = m_rays[0] + (m_raye[0] - m_rays[0])*t;
-							m_mpos[1] = m_rays[1] + (m_raye[1] - m_rays[1])*t;
-							m_mpos[2] = m_rays[2] + (m_raye[2] - m_rays[2])*t;
+							m_mpos[0] = m_rays[0] + (m_raye[0] - m_rays[0]) * t;
+							m_mpos[1] = m_rays[1] + (m_raye[1] - m_rays[1]) * t;
+							m_mpos[2] = m_rays[2] + (m_raye[2] - m_rays[2]) * t;
 						}
 						else
 						{
 							glm::vec3 pos;
-							pos[0] = m_rays[0] + (m_raye[0] - m_rays[0])*t;
-							pos[1] = m_rays[1] + (m_raye[1] - m_rays[1])*t;
-							pos[2] = m_rays[2] + (m_raye[2] - m_rays[2])*t;
+							pos[0] = m_rays[0] + (m_raye[0] - m_rays[0]) * t;
+							pos[1] = m_rays[1] + (m_raye[1] - m_rays[1]) * t;
+							pos[2] = m_rays[2] + (m_raye[2] - m_rays[2]) * t;
 							bool shift = (SDL_GetModState() & KMOD_SHIFT) != 0;
 
 							m_meshTool->handleClick(m_rays, pos, shift);
@@ -584,8 +764,7 @@ void Application::RenderInterface()
 	{
 		if (ImGui::BeginMenu("File"))
 		{
-			if (ImGui::MenuItem("Open Zone", "Ctrl+O", nullptr,
-				!m_meshTool->isBuildingTiles()))
+			if (ImGui::MenuItem("Open Zone", "Ctrl+O", nullptr, !m_meshTool->isBuildingTiles()))
 			{
 				m_showZonePickerDialog = true;
 			}
@@ -747,17 +926,39 @@ void Application::RenderInterface()
 		if (!m_zoneLoaded)
 			ImGui::TextColored(ImColor(255, 255, 0), "No zone loaded (Ctrl+O to open zone)");
 		else
+		{
 			ImGui::TextColored(ImColor(0, 255, 0), m_zoneDisplayName.c_str());
+			ImGui::SameLine(ImGui::GetContentRegionAvailWidth() - 60);
+			ImGui::TextColored(ImColor(255, 255, 255), "FPS: %3.1f", m_FPS);
+		}
 
 		ImGui::Separator();
 
 		float camPos[3] = { m_cam.z, m_cam.x, m_cam.y };
+		float camRot[3] = { m_r.x , m_r.y, 0 };
 		if (ImGui::InputFloat3("Position", camPos, 2))
 		{
 			m_cam.x = camPos[1];
 			m_cam.y = camPos[2];
 			m_cam.z = camPos[0];
 		}
+		if (ImGui::InputFloat2("Rotation", camRot, 2))
+		{
+			m_r.x = camRot[0];
+			m_r.y = camRot[1];
+
+		}
+
+		if (ImGui::Button("Sync View With EQ"))
+		{
+			m_syncViewFlag = 1;
+		}
+
+		if (ImGui::Button(ICON_FA_CHEVRON_CIRCLE_RIGHT " Load, Build, and Save Next Unfinished Zone"))
+		{
+			m_BuildMissing = true;
+		}
+
 
 		if (m_geom)
 		{
@@ -1376,9 +1577,9 @@ void ImportExportSettingsDialog::Show(bool* open /* = nullptr */)
 
 			ImGui::PopItemWidth();
 
-			ImGui::CheckboxFlags("Mesh Settings", (uint32_t*)&m_fields, +PersistedDataFields::BuildSettings);
-			ImGui::CheckboxFlags("Area Types", (uint32_t*)&m_fields, +PersistedDataFields::AreaTypes);
-			ImGui::CheckboxFlags("Convex Volumes", (uint32_t*)&m_fields, +PersistedDataFields::ConvexVolumes);
+			ImGui::CheckboxFlags("Mesh Settings", (uint32_t*)& m_fields, +PersistedDataFields::BuildSettings);
+			ImGui::CheckboxFlags("Area Types", (uint32_t*)& m_fields, +PersistedDataFields::AreaTypes);
+			ImGui::CheckboxFlags("Convex Volumes", (uint32_t*)& m_fields, +PersistedDataFields::ConvexVolumes);
 
 			if (ImGui::Button(m_import ? "Import" : "Export"))
 			{
